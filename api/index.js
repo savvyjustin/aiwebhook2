@@ -82,7 +82,9 @@ export default async function handler(req) {
       },
     });
     const messages = await msgRes.json();
-    const reply = messages.data[0].content[0].text.value;
+    const reply =
+      messages?.data?.[0]?.content?.[0]?.text?.value ||
+      "No response from assistant.";
 
     return new Response(
       JSON.stringify({ reply }),
