@@ -4,7 +4,7 @@ export const config = {
 
 import * as cheerio from "cheerio";
 
-const OPENAI_API_KEY = "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";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID = "asst_M4xZQylcC0UhrHRgwEAsOI6b";
 
 export default async function handler(req) {
