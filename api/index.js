@@ -12,9 +12,15 @@ export default async function handler(req, res) {
 
   try {
     console.log("🔍 Scraping URL...");
-    const page = await axios.get(url);
-    const $ = cheerio.load(page.data);
-    const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
+const page = await axios.get(url, {
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+  }
+});
+const $ = cheerio.load(page.data);
+const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
+
 
     console.log("🧵 Creating thread...");
     const threadRes = await axios.post(
