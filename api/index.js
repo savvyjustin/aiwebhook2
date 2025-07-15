@@ -1,28 +1,42 @@
 import axios from "axios";
-import * as cheerio from "cheerio";
+import * as cheerio from "cheerio"; // ✅ FIXED for ES modules
+import express from "express";
+import bodyParser from "body-parser";
+import dotenv from "dotenv";
 
-export default async function handler(req, res) {
-  if (req.method !== "POST") return res.status(405).json({ error: "Only POST requests allowed" });
+dotenv.config();
 
+const app = express();
+app.use(bodyParser.json());
+
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID;
+
+app.post("/api", async (req, res) => {
   const { url } = req.body;
-  if (!url) return res.status(400).json({ error: "No URL provided" });
 
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID;
+  if (!url) {
+    return res.status(400).send({ error: "Missing 'url' in request body." });
+  }
 
   try {
-    console.log("🔍 Scraping URL...");
-const page = await axios.get(url, {
-  headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-  }
-});
-const $ = cheerio.load(page.data);
-const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
+    console.log("🔍 Scraping URL:", url);
 
+    const page = await axios.get(url, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+      },
+      timeout: 10000,
+    });
 
-    console.log("🧵 Creating thread...");
+    console.log("✅ Page fetched");
+
+    const $ = cheerio.load(page.data);
+    const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 4000);
+    console.log("📦 Extracted text length:", text.length);
+
+    // Step 1: Create thread
     const threadRes = await axios.post(
       "https://api.openai.com/v1/threads",
       {},
@@ -34,14 +48,14 @@ const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
       }
     );
     const threadId = threadRes.data.id;
-    console.log("✅ Thread ID:", threadId);
+    console.log("🧵 Thread created:", threadId);
 
-    console.log("💬 Posting message...");
+    // Step 2: Add user message
     await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/messages`,
       {
         role: "user",
-        content: `From the following article, extract:\n\n1. Company name\n2. Disease or condition\n3. Suggested action items\n\nArticle:\n${text}`,
+        content: `Please analyze the following article and extract:\n\n1. Company name\n2. Condition or disease\n3. Suggested action items\n\nText:\n${text}`,
       },
       {
         headers: {
@@ -50,8 +64,9 @@ const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
         },
       }
     );
+    console.log("✉️ Message added to thread");
 
-    console.log("🚀 Running assistant...");
+    // Step 3: Run the assistant
     const runRes = await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/runs`,
       { assistant_id: ASSISTANT_ID },
@@ -63,13 +78,12 @@ const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
       }
     );
     const runId = runRes.data.id;
-    console.log("✅ Run ID:", runId);
+    console.log("▶️ Assistant run started:", runId);
 
-    console.log("⏳ Polling run status...");
-    let runStatus = "queued";
-    let attempts = 0;
-    while (["queued", "in_progress"].includes(runStatus) && attempts < 10) {
-      const statusRes = await axios.get(
+    // Step 4: Poll until completed
+    let status = "queued";
+    while (["queued", "in_progress"].includes(status)) {
+      const check = await axios.get(
         `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
         {
           headers: {
@@ -78,17 +92,12 @@ const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
           },
         }
       );
-      runStatus = statusRes.data.status;
-      if (runStatus === "completed") break;
-      await new Promise((r) => setTimeout(r, 1500));
-      attempts++;
+      status = check.data.status;
+      console.log("⏳ Run status:", status);
+      if (status !== "completed") await new Promise((r) => setTimeout(r, 1500));
     }
 
-    if (runStatus !== "completed") {
-      return res.status(500).json({ error: "Assistant run timed out." });
-    }
-
-    console.log("📥 Fetching assistant response...");
+    // Step 5: Get result
     const messagesRes = await axios.get(
       `https://api.openai.com/v1/threads/${threadId}/messages`,
       {
@@ -99,12 +108,31 @@ const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
       }
     );
 
-    const reply = messagesRes.data.data?.[0]?.content?.[0]?.text?.value;
-    if (!reply) return res.status(500).json({ reply: "No response from assistant." });
+    const reply = messagesRes.data.data[0]?.content[0]?.text?.value || "";
+    console.log("📝 Assistant reply:", reply);
 
-    res.status(200).json({ reply });
+    const lines = reply.split("\n").map((l) => l.trim());
+    const company =
+      lines.find((l) => l.startsWith("1"))?.split(":")[1]?.trim() || "";
+    const condition =
+      lines.find((l) => l.startsWith("2"))?.split(":")[1]?.trim() || "";
+    const actions =
+      lines.find((l) => l.startsWith("3"))?.split(":")[1]?.trim() || "";
+
+    res.send({ company, condition, actions });
   } catch (err) {
-    console.error("❌ Server error:", err.message);
-    res.status(500).json({ error: err.message });
+    console.error("❌ Error:", err.message);
+    res.status(500).send({ error: err.message || "Unknown error occurred" });
   }
-}
+});
+
+// Health check route
+app.get("/", (_, res) => {
+  res.send("✅ AI Webhook is live.");
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Server listening on port ${PORT}`);
+});
