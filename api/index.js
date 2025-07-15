@@ -1,105 +1,110 @@
-export const config = {
-  runtime: "edge",
-};
+import axios from "axios";
+import cheerio from "cheerio";
 
-import * as cheerio from "cheerio";
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ASSISTANT_ID = "asst_M4xZQylcC0UhrHRgwEAsOI6b";
-
-export default async function handler(req) {
+export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return new Response(JSON.stringify({ error: "Method not allowed" }), {
-      status: 405,
-    });
+    return res.status(405).send({ error: "Only POST requests allowed" });
+  }
+
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: "No URL provided" });
+
+  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+  const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID;
+
+  if (!OPENAI_API_KEY || !ASSISTANT_ID) {
+    return res.status(500).json({ error: "Missing environment variables" });
   }
 
   try {
-    const { url } = await req.json();
-    const response = await fetch(url);
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 5000);
+    // 1. Scrape URL and trim to 1000 characters
+    const page = await axios.get(url);
+    const $ = cheerio.load(page.data);
+    const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
 
-    // Step 1: Create a thread
-    const threadRes = await fetch("https://api.openai.com/v1/threads", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-        "Content-Type": "application/json",
-      },
-    });
-    const { id: threadId } = await threadRes.json();
-
-    // Step 2: Add user message
-    await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        role: "user",
-        content: `Please extract the following from this article:\n\n1. Company name\n2. Disease or condition\n3. Suggested action items.\n\nText:\n${text}`,
-      }),
-    });
-
-    // Step 3: Run assistant
-    const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        assistant_id: ASSISTANT_ID,
-      }),
-    });
-    const { id: runId } = await runRes.json();
-
-    // Step 4: Poll for completion
-    let status = "queued";
-    while (["queued", "in_progress"].includes(status)) {
-      await new Promise((res) => setTimeout(res, 1500));
-      const check = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
+    // 2. Create thread
+    const threadRes = await axios.post(
+      "https://api.openai.com/v1/threads",
+      {},
+      {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
           "OpenAI-Beta": "assistants=v2",
         },
-      });
-      const data = await check.json();
-      status = data.status;
+      }
+    );
+    const threadId = threadRes.data.id;
+
+    // 3. Add message
+    await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/messages`,
+      {
+        role: "user",
+        content: `From the following article, extract:\n\n1. Company name\n2. Disease or condition\n3. Suggested action items\n\nArticle:\n${text}`,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    // 4. Run assistant
+    const runRes = await axios.post(
+      `https://api.openai.com/v1/threads/${threadId}/runs`,
+      { assistant_id: ASSISTANT_ID },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+          "Content-Type": "application/json",
+        },
+      }
+    );
+    const runId = runRes.data.id;
+
+    // 5. Poll run status (max 10 tries)
+    let runStatus = "queued";
+    let attempts = 0;
+    while (["queued", "in_progress"].includes(runStatus) && attempts < 10) {
+      const statusRes = await axios.get(
+        `https://api.openai.com/v1/threads/${threadId}/runs/${runId}`,
+        {
+          headers: {
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "OpenAI-Beta": "assistants=v2",
+          },
+        }
+      );
+      runStatus = statusRes.data.status;
+      if (runStatus === "completed") break;
+      await new Promise((r) => setTimeout(r, 1500));
+      attempts++;
     }
 
-    // Step 5: Get final messages
-    const msgRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Beta": "assistants=v2",
-      },
-    });
-    const messages = await msgRes.json();
-    const reply =
-      messages?.data?.[0]?.content?.[0]?.text?.value ||
-      "No response from assistant.";
+    if (runStatus !== "completed") {
+      return res.status(500).json({ error: "Assistant run timed out." });
+    }
 
-    return new Response(
-      JSON.stringify({ reply }),
+    // 6. Get message
+    const messagesRes = await axios.get(
+      `https://api.openai.com/v1/threads/${threadId}/messages`,
       {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Beta": "assistants=v2",
+        },
       }
     );
-  } catch (error) {
-    return new Response(
-      JSON.stringify({ error: error.message || "Unexpected error" }),
-      {
-        status: 500,
-        headers: { "Content-Type": "application/json" },
-      }
-    );
+
+    const reply = messagesRes.data.data?.[0]?.content?.[0]?.text?.value;
+    if (!reply) return res.status(500).json({ reply: "No response from assistant." });
+
+    res.status(200).json({ reply });
+  } catch (err) {
+    console.error("❌ Server error:", err.message);
+    res.status(500).json({ error: err.message || "Server failed" });
   }
 }
