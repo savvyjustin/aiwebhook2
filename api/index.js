@@ -2,9 +2,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    return res.status(405).send({ error: "Only POST requests allowed" });
-  }
+  if (req.method !== "POST") return res.status(405).json({ error: "Only POST requests allowed" });
 
   const { url } = req.body;
   if (!url) return res.status(400).json({ error: "No URL provided" });
@@ -12,17 +10,13 @@ export default async function handler(req, res) {
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const ASSISTANT_ID = process.env.OPENAI_ASSISTANT_ID;
 
-  if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-    return res.status(500).json({ error: "Missing environment variables" });
-  }
-
   try {
-    // 1. Scrape URL and trim to 1000 characters
+    console.log("🔍 Scraping URL...");
     const page = await axios.get(url);
     const $ = cheerio.load(page.data);
     const text = $("body").text().replace(/\s+/g, " ").trim().slice(0, 1000);
 
-    // 2. Create thread
+    console.log("🧵 Creating thread...");
     const threadRes = await axios.post(
       "https://api.openai.com/v1/threads",
       {},
@@ -34,8 +28,9 @@ export default async function handler(req, res) {
       }
     );
     const threadId = threadRes.data.id;
+    console.log("✅ Thread ID:", threadId);
 
-    // 3. Add message
+    console.log("💬 Posting message...");
     await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/messages`,
       {
@@ -46,12 +41,11 @@ export default async function handler(req, res) {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
           "OpenAI-Beta": "assistants=v2",
-          "Content-Type": "application/json",
         },
       }
     );
 
-    // 4. Run assistant
+    console.log("🚀 Running assistant...");
     const runRes = await axios.post(
       `https://api.openai.com/v1/threads/${threadId}/runs`,
       { assistant_id: ASSISTANT_ID },
@@ -59,13 +53,13 @@ export default async function handler(req, res) {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
           "OpenAI-Beta": "assistants=v2",
-          "Content-Type": "application/json",
         },
       }
     );
     const runId = runRes.data.id;
+    console.log("✅ Run ID:", runId);
 
-    // 5. Poll run status (max 10 tries)
+    console.log("⏳ Polling run status...");
     let runStatus = "queued";
     let attempts = 0;
     while (["queued", "in_progress"].includes(runStatus) && attempts < 10) {
@@ -88,7 +82,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Assistant run timed out." });
     }
 
-    // 6. Get message
+    console.log("📥 Fetching assistant response...");
     const messagesRes = await axios.get(
       `https://api.openai.com/v1/threads/${threadId}/messages`,
       {
@@ -105,6 +99,6 @@ export default async function handler(req, res) {
     res.status(200).json({ reply });
   } catch (err) {
     console.error("❌ Server error:", err.message);
-    res.status(500).json({ error: err.message || "Server failed" });
+    res.status(500).json({ error: err.message });
   }
 }
